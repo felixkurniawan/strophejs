@@ -220,6 +220,7 @@ Strophe = {
      *  Status.DISCONNECTED - The connection has been terminated
      *  Status.DISCONNECTING - The connection is currently being terminated
      *  Status.ATTACHED - The connection has been attached
+     *  Status.CONNTIMEOUT - The connection has timed out
      */
     Status: {
         ERROR: 0,
@@ -231,7 +232,8 @@ Strophe = {
         DISCONNECTED: 6,
         DISCONNECTING: 7,
         ATTACHED: 8,
-        REDIRECT: 9
+        REDIRECT: 9,
+        CONNTIMEOUT: 10
     },
 
     /** Constants: Log Level Constants
@@ -1554,7 +1556,7 @@ Strophe.TimedHandler.prototype = {
  *  and for some reason need to send cookies to it.
  *  In order for this to work cross-domain, the server must also enable
  *  credentials by setting the Access-Control-Allow-Credentials response header
- *  to “true”. For most usecases however this setting should be false (which
+ *  to "true". For most usecases however this setting should be false (which
  *  is the default).
  *  Additionally, when using Access-Control-Allow-Credentials, the
  *  Access-Control-Allow-Origin header can't be set to the wildcard "*", but
@@ -1613,6 +1615,7 @@ Strophe.Connection = function (service, options)
     this.do_authentication = true;
     this.paused = false;
     this.restored = false;
+    this.resumed = false;
 
     this._data = [];
     this._uniqueId = 0;
@@ -1625,7 +1628,10 @@ Strophe.Connection = function (service, options)
     this.maxRetries = 5;
 
     // Call onIdle callback every 1/10th of a second
-    this._idleTimeout = setTimeout(this._onIdle.bind(this), 100);
+    // XXX: setTimeout should be called only with function expressions (23974bc1)
+    this._idleTimeout = setTimeout(function() {
+        this._onIdle();
+    }.bind(this), 100);
 
     utils.addCookies(this.options.cookies);
 
@@ -1766,7 +1772,7 @@ Strophe.Connection.prototype = {
      *    (String) authcid - The optional alternative authentication identity
      *      (username) if intending to impersonate another user.
      */
-    connect: function (jid, pass, callback, wait, hold, route, authcid)
+    connect: function (jid, pass, callback, wait, hold, route, authcid, resumeid, seqnumber)
     {
         this.jid = jid;
         /** Variable: authzid
@@ -1790,6 +1796,9 @@ Strophe.Connection.prototype = {
         this.connected = false;
         this.authenticated = false;
         this.restored = false;
+        this.resumed = false;
+        this.resumeid = resumeid;
+        this.seqnumber = seqnumber;
 
         // parse jid for domain
         this.domain = Strophe.getDomainFromJid(this.jid);
@@ -2158,7 +2167,10 @@ Strophe.Connection.prototype = {
 
         this._proto._sendRestart();
 
-        this._idleTimeout = setTimeout(this._onIdle.bind(this), 100);
+        // XXX: setTimeout should be called only with function expressions (23974bc1)
+        this._idleTimeout = setTimeout(function() {
+            this._onIdle();
+        }.bind(this), 100);
     },
 
     /** Function: addTimedHandler
@@ -2787,6 +2799,12 @@ Strophe.Connection.prototype = {
             while (handlers.length) {
                 this.deleteHandler(handlers.pop());
             }
+
+            if (this.resumeid) {
+                this._stream_resume.bind(this)(elem);
+                return false
+            }
+
             this._sasl_auth1_cb.bind(this)(elem);
             return false;
         };
@@ -2801,6 +2819,49 @@ Strophe.Connection.prototype = {
         this._sendRestart();
 
         return false;
+    },
+
+    _stream_resume: function (elem)
+    {
+        var stanza = $build("resume", {
+            xmlns: "urn:xmpp:sm:3",
+            previd: this.resumeid,
+            h: this.seqnumber
+        });
+
+        Strophe.info("Resuming stream...");
+
+        this._stream_resumed_handler = this._addSysHandler(
+            function(stanza) {
+                this._stream_resumed_cb.bind(this)(stanza, elem);
+            }.bind(this),
+            null, "resumed", null);
+
+        this._stream_resume_failed_handler = this._addSysHandler(
+            function(stanza) {
+                this._stream_resume_failed_cb.bind(this)(stanza, elem);
+            }.bind(this),
+            null, "failed", null);
+
+        this.send(stanza.tree());
+    },
+
+    _stream_resumed_cb: function (stanza)
+    {
+        Strophe.info("Stream resumed.");
+
+        this.authenticated = true;
+        this.resumed = true;
+        this._changeConnectStatus(Strophe.Status.CONNECTED, null);
+    },
+
+    _stream_resume_failed_cb: function (stanza, elem)
+    {
+        Strophe.info("Stream resumption failed.");
+
+        this.deleteHandler(this._stream_resumed_cb);
+
+        this._sasl_auth1_cb.bind(this)(elem);
     },
 
     /** PrivateFunction: _sasl_auth1_cb
@@ -3035,6 +3096,8 @@ Strophe.Connection.prototype = {
     {
         Strophe.info("_onDisconnectTimeout was called");
 
+        this._changeConnectStatus(Strophe.Status.CONNTIMEOUT, null);
+
         this._proto._onDisconnectTimeout();
 
         // actually disconnect
@@ -3093,7 +3156,10 @@ Strophe.Connection.prototype = {
 
         // reactivate the timer only if connected
         if (this.connected) {
-            this._idleTimeout = setTimeout(this._onIdle.bind(this), 100);
+            // XXX: setTimeout should be called only with function expressions (23974bc1)
+            this._idleTimeout = setTimeout(function() {
+                this._onIdle();
+            }.bind(this), 100);
         }
     }
 };
