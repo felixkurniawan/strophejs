@@ -296,7 +296,6 @@ Strophe.Websocket.prototype = {
                 Strophe.info("Couldn't send <close /> tag.");
             }
         }
-        this._conn._doDisconnect();
     },
 
     /** PrivateFunction: _doDisconnect
